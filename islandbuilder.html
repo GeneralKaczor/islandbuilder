@@ -106,6 +106,15 @@
     color:var(--paper); font-size:12px; opacity:0.85; letter-spacing:0.3px;
     min-height:16px; text-align:center;
   }
+  #delete-btn{
+    position:fixed; right:16px; bottom:156px; z-index:21;
+    background:linear-gradient(180deg,#e56f52,#b93e2d);
+    border:2px solid #7f281d; color:#fff; font-weight:800;
+    padding:11px 15px; border-radius:14px; cursor:pointer;
+    box-shadow:0 6px 16px rgba(0,0,0,.35); display:flex; gap:8px; align-items:center;
+  }
+  #delete-btn.active{background:linear-gradient(180deg,#ffb44d,#e98a19);border-color:#9a5a0a;color:#2e1c08;}
+  .refinery-status{font-size:9px;color:#ffd36b;margin-top:2px;}
 
   /* ---------- Resident mode ---------- */
   #resident-btn{
@@ -307,6 +316,7 @@
   <div id="build-row"></div>
 </div>
 
+<button id="delete-btn"><span>🗑️</span><span>Delete building</span></button>
 <button id="resident-btn"><span class="ico">🚶</span> Become a resident</button>
 <div id="resident-hud">Walking as a resident · <b>WASD / arrows</b> to move · <b>drag</b> to look<br><span style="opacity:0.7;font-size:11px;">Building is paused while you're on the ground</span></div>
 <button id="exit-resident-btn">Exit resident view</button>
@@ -338,13 +348,20 @@ const BUILDINGS = {
   library:{id:'library',name:'Library',     icon:'📚', cat:'civic', cost:95, income:1.6,  color:0xb08968, footprint:1, scale:1.1},
   windmill:{id:'windmill',name:'Windmill',  icon:'🌾', cat:'civic', cost:110,income:2.4,  color:0xd8cdb0, footprint:1},
   lighthouse:{id:'lighthouse',name:'Lighthouse',icon:'🗼',cat:'civic',cost:160,income:3.0,color:0xf2e9d8, footprint:1},
+  refinery:{id:'refinery',name:'Refinery',icon:'🏭',cat:'civic',cost:5000,income:0,color:0x68747d,footprint:1, payout:1000, payoutEvery:30000},
+  factory:{id:'factory',name:'Factory',icon:'🏗️',cat:'civic',cost:700,income:10,color:0x78848b,footprint:1},
+  apartment:{id:'apartment',name:'Apartments',icon:'🏙️',cat:'house',cost:900,income:16,color:0xa9b7c4,footprint:1,scale:1.45},
+  hotel:{id:'hotel',name:'Hotel',icon:'🏨',cat:'house',cost:1400,income:24,color:0xd6b17b,footprint:1,scale:1.6},
+  powerplant:{id:'powerplant',name:'Power Plant',icon:'⚡',cat:'civic',cost:2200,income:35,color:0x69727a,footprint:1,scale:1.35},
+  warehouse:{id:'warehouse',name:'Warehouse',icon:'📦',cat:'civic',cost:420,income:6,color:0x9b7b56,footprint:1},
+  park:{id:'park',name:'City Park',icon:'🌲',cat:'deco',cost:120,income:0.7,color:0x4d8b58,footprint:1},
   tree:   {id:'tree',   name:'Tree',        icon:'🌳', cat:'deco',  cost:2,  income:0.02, color:0x3f7d4c, footprint:1},
   pine:   {id:'pine',   name:'Pine',        icon:'🌲', cat:'deco',  cost:3,  income:0.03, color:0x2f6b3a, footprint:1},
   garden: {id:'garden', name:'Garden',      icon:'🌷', cat:'deco',  cost:8,  income:0.08, color:0xd6688a, footprint:1},
   statue: {id:'statue', name:'Statue',      icon:'🗿', cat:'deco',  cost:18, income:0.12, color:0x8f9296, footprint:1},
   fountain:{id:'fountain',name:'Fountain',  icon:'⛲', cat:'deco',  cost:25, income:0.2,  color:0x7fb8c9, footprint:1},
 };
-const BUILD_ORDER = ['road','hut','cottage','pine','tree','market','garden','dock','villa','statue','tavern','library','fountain','lighthouse','windmill','tower','mansion'];
+const BUILD_ORDER = ['road','hut','cottage','villa','tower','mansion','apartment','hotel','market','dock','tavern','library','warehouse','factory','powerplant','refinery','windmill','lighthouse','garden','park','pine','tree','statue','fountain'];
 
 /* =====================================================================
    STATE
@@ -352,9 +369,11 @@ const BUILD_ORDER = ['road','hut','cottage','pine','tree','market','garden','doc
 let state = {
   islandName: '', islandCode: '', playerName: '',
   coins: 0, baseRate: 1.0,
-  buildings: {},      // key "x,z" -> {type, rotY}
+  buildings: {},      // key "x,z" -> {type, rotY, placedBy, placedAt, lastPayout}
   cycleStart: Date.now(),
+  economyAt: Date.now(),
   version: 0,
+  refineryBank: 0,
 };
 let selectedTool = null;
 let residentMode = false;
@@ -369,7 +388,7 @@ async function saveIslandState(){
     await window.storage.set('island:'+state.islandCode, JSON.stringify({
       islandName: state.islandName, coins: state.coins, baseRate: state.baseRate,
       buildings: state.buildings, cycleStart: state.cycleStart, version: (state.version||0)+1,
-      updatedAt: Date.now(), updatedBy: myPlayerId
+      refineryBank: state.refineryBank||0, economyAt: state.economyAt||Date.now(), updatedAt: Date.now(), updatedBy: myPlayerId
     }), true);
     state.version = (state.version||0)+1;
   }catch(e){ console.warn('save failed', e); }
@@ -394,7 +413,7 @@ function startPolling(){
       rebuildSceneFromState();
       updateHUD();
     }
-  }, 2500);
+  }, 700);
 }
 function codeFor(name){
   // deterministic-ish short code
@@ -553,11 +572,25 @@ function setupControls(){
 }
 
 function handleTapSelect(clientX, clientY){
-  if(residentMode) return; // no building while walking
-  if(!selectedTool) return;
+  if(residentMode) return;
   mouse.x = (clientX/window.innerWidth)*2-1;
   mouse.y = -(clientY/window.innerHeight)*2+1;
   raycaster.setFromCamera(mouse, camera);
+
+  // Delete mode selects an existing building.
+  if(selectedTool === '__delete__'){
+    const hits = raycaster.intersectObjects(buildGroup.children, true);
+    if(hits.length){
+      let obj = hits[0].object;
+      while(obj.parent && obj.parent !== buildGroup) obj = obj.parent;
+      if(obj.userData && Number.isFinite(obj.userData.gx)){
+        removeBuilding(obj.userData.gx, obj.userData.gz);
+      }
+    }
+    return;
+  }
+
+  if(!selectedTool) return;
   const hits = raycaster.intersectObjects([islandGroundMesh]);
   if(hits.length===0) return;
   const p = hits[0].point;
@@ -568,150 +601,232 @@ function handleTapSelect(clientX, clientY){
   placeBuilding(gx, gz, selectedTool);
 }
 
-/* =====================================================================
-   BUILDING PLACEMENT
-===================================================================== */
-function placeBuilding(gx, gz, type){
+async function syncLatestBeforeAction(){
+  if(!state.islandCode) return;
+  const remote = await loadIslandState(state.islandCode);
+  if(remote && remote.version >= (state.lastSeenVersion||0)){
+    state.coins = Number(remote.coins)||0;
+    state.baseRate = Number(remote.baseRate)||1;
+    state.buildings = remote.buildings||{};
+    state.cycleStart = remote.cycleStart||state.cycleStart;
+    state.refineryBank = remote.refineryBank||0;
+    state.lastSeenVersion = remote.version||0;
+    settleEconomy();
+    rebuildSceneFromState();
+    updateHUD();
+  }
+}
+
+function settleEconomy(now=Date.now()){
+  if(!state.economyAt) state.economyAt=now;
+  const elapsed=Math.max(0, now-state.economyAt);
+  if(elapsed<250) return;
+  let cursor=state.economyAt;
+  while(cursor<now){
+    const pos=((cursor-state.cycleStart)%CYCLE_MS+CYCLE_MS)%CYCLE_MS;
+    const remaining=pos<DAY_MS ? DAY_MS-pos : CYCLE_MS-pos;
+    const span=Math.min(now-cursor,remaining);
+    if(pos<DAY_MS) state.coins += state.baseRate*(span/1000);
+    cursor+=span;
+  }
+  for(const key of Object.keys(state.buildings||{})){
+    const b=state.buildings[key];
+    if(b.type!=='refinery') continue;
+    const last=Number(b.lastPayout)||Number(b.placedAt)||now;
+    const cycles=Math.floor(Math.max(0,now-last)/BUILDINGS.refinery.payoutEvery);
+    if(cycles>0){
+      state.coins += cycles*BUILDINGS.refinery.payout;
+      b.lastPayout=last+cycles*BUILDINGS.refinery.payoutEvery;
+    }
+  }
+  state.economyAt=now;
+}
+async function placeBuilding(gx, gz, type){
+  await syncLatestBeforeAction();
   const key = gx+','+gz;
   if(state.buildings[key]) { flashHint("Something's already there"); return; }
   const def = BUILDINGS[type];
+  if(!def) return;
   if(state.coins < def.cost){ flashHint("Not enough coins"); return; }
+
   state.coins -= def.cost;
   state.baseRate += def.income;
-  state.buildings[key] = {type, rotY: (Math.floor(Math.random()*4))*(Math.PI/2)};
+  state.buildings[key] = {
+    type,
+    rotY:(Math.floor(Math.random()*4))*(Math.PI/2),
+    placedBy:myPlayerId,
+    placedAt:Date.now(),
+    lastPayout:Date.now()
+  };
   addBuildingMesh(gx, gz, state.buildings[key]);
   updateHUD();
-  saveIslandState();
+  await saveIslandState();
   refreshCarRoutes();
 }
 
+async function removeBuilding(gx, gz){
+  await syncLatestBeforeAction();
+  const key = gx+','+gz;
+  const data = state.buildings[key];
+  if(!data) return;
+  const def = BUILDINGS[data.type];
+  if(!def) return;
+
+  // Refund 50% of the original construction cost.
+  const refund = Math.floor(def.cost*0.5);
+  state.coins += refund;
+  state.baseRate = Math.max(1, state.baseRate - def.income);
+  delete state.buildings[key];
+
+  rebuildSceneFromState();
+  updateHUD();
+  await saveIslandState();
+  refreshCarRoutes();
+  flashHint(`Removed ${def.name} • +$${refund}`);
+}
 function worldPos(gx, gz){ return new THREE.Vector3(gx*TILE, 0, gz*TILE); }
 
 function meshForBuilding(type){
   const def = BUILDINGS[type];
   const g = new THREE.Group();
+
+  const mat = (color, rough=.75, metal=0) =>
+    new THREE.MeshStandardMaterial({color, roughness:rough, metalness:metal});
+
   if(type==='road'){
-    const geo = new THREE.BoxGeometry(TILE*0.98, 0.12, TILE*0.98);
-    const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({color:def.color, roughness:0.9}));
-    m.position.y = 0.32; m.receiveShadow=true;
-    g.add(m);
-    const line = new THREE.Mesh(new THREE.BoxGeometry(TILE*0.06,0.13,TILE*0.7), new THREE.MeshStandardMaterial({color:0xf0e6c0}));
-    line.position.y=0.39; g.add(line);
-  } else if(type==='tree'){
-    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.15,0.22,1.1,6), new THREE.MeshStandardMaterial({color:0x6b4a2c}));
-    trunk.position.y = 0.85; trunk.castShadow=true;
-    const leaves = new THREE.Mesh(new THREE.SphereGeometry(0.9,8,6), new THREE.MeshStandardMaterial({color:def.color}));
-    leaves.position.y = 1.7; leaves.castShadow=true;
-    g.add(trunk, leaves);
-  } else if(type==='garden'){
-    const base = new THREE.Mesh(new THREE.CylinderGeometry(1.2,1.3,0.25,10), new THREE.MeshStandardMaterial({color:0x3a5c34}));
-    base.position.y=0.4; base.receiveShadow=true;
-    g.add(base);
-    for(let i=0;i<5;i++){
-      const fl = new THREE.Mesh(new THREE.SphereGeometry(0.16,6,6), new THREE.MeshStandardMaterial({color:def.color}));
-      const ang = i*(Math.PI*2/5);
-      fl.position.set(Math.cos(ang)*0.7, 0.6, Math.sin(ang)*0.7);
-      fl.castShadow=true;
-      g.add(fl);
+    const base = new THREE.Mesh(new THREE.BoxGeometry(TILE*.98,.12,TILE*.98), mat(0x3f464b,.95));
+    base.position.y=.32; base.receiveShadow=true; g.add(base);
+    const edge1 = new THREE.Mesh(new THREE.BoxGeometry(.09,.14,TILE*.78),mat(0xd7c98d));
+    const edge2=edge1.clone(); edge1.position.set(-1.35,.4,0); edge2.position.set(1.35,.4,0);
+    g.add(edge1,edge2);
+    const center = new THREE.Mesh(new THREE.BoxGeometry(.12,.15,TILE*.36),mat(0xf4e6ad));
+    center.position.y=.4; g.add(center);
+  } else if(type==='tree' || type==='pine'){
+    const pine=type==='pine';
+    const trunk=new THREE.Mesh(new THREE.CylinderGeometry(.15,.24,1.25,8),mat(0x6b4528));
+    trunk.position.y=.9; trunk.castShadow=true; g.add(trunk);
+    if(pine){
+      for(let i=0;i<4;i++){
+        const cone=new THREE.Mesh(new THREE.ConeGeometry(.95-i*.13,1.15,9),mat(def.color));
+        cone.position.y=1.35+i*.58; cone.castShadow=true; g.add(cone);
+      }
+    }else{
+      const crown=new THREE.Mesh(new THREE.SphereGeometry(1.05,12,9),mat(def.color));
+      crown.position.y=1.9; crown.scale.set(1,1.05,1); crown.castShadow=true; g.add(crown);
+      const crown2=new THREE.Mesh(new THREE.SphereGeometry(.72,10,8),mat(0x5f9a59));
+      crown2.position.set(.45,2.15,.2); crown2.castShadow=true; g.add(crown2);
+    }
+  } else if(type==='garden' || type==='park'){
+    const base=new THREE.Mesh(new THREE.BoxGeometry(3.0,.22,3.0),mat(0x4d6f42));
+    base.position.y=.38; base.receiveShadow=true; g.add(base);
+    if(type==='park'){
+      for(let i=0;i<3;i++){
+        const tr=new THREE.Mesh(new THREE.CylinderGeometry(.1,.14,.7,7),mat(0x6b4528));
+        tr.position.set(-.9+i*.9,.75,.2); g.add(tr);
+        const c=new THREE.Mesh(new THREE.SphereGeometry(.42,8,7),mat(0x4d8b58));
+        c.position.set(-.9+i*.9,1.25,.2); c.castShadow=true; g.add(c);
+      }
+      const bench=new THREE.Mesh(new THREE.BoxGeometry(1.1,.12,.32),mat(0x7a5430));
+      bench.position.set(0,.65,-.7); g.add(bench);
+    }else{
+      for(let i=0;i<8;i++){
+        const fl=new THREE.Mesh(new THREE.SphereGeometry(.13,7,6),mat(i%2?0xf2c94c:0xd6688a));
+        const a=i*Math.PI/4; fl.position.set(Math.cos(a)*.95,.65,Math.sin(a)*.95); g.add(fl);
+      }
     }
   } else if(type==='fountain'){
-    const base = new THREE.Mesh(new THREE.CylinderGeometry(1.3,1.4,0.5,14), new THREE.MeshStandardMaterial({color:0xcfc7b0}));
-    base.position.y=0.55; base.castShadow=true; base.receiveShadow=true;
-    const water = new THREE.Mesh(new THREE.CylinderGeometry(1.0,1.0,0.12,14), new THREE.MeshStandardMaterial({color:def.color, transparent:true, opacity:0.85}));
-    water.position.y = 0.85;
-    const spout = new THREE.Mesh(new THREE.CylinderGeometry(0.12,0.16,1.1,8), new THREE.MeshStandardMaterial({color:0xcfc7b0}));
-    spout.position.y = 1.1;
-    g.add(base, water, spout);
+    const base=new THREE.Mesh(new THREE.CylinderGeometry(1.35,1.45,.5,16),mat(0xbfc5c7,.45,.35));
+    base.position.y=.55; g.add(base);
+    const water=new THREE.Mesh(new THREE.CylinderGeometry(1.05,1.05,.12,16),mat(0x4da9c6,.25,.2));
+    water.position.y=.84; g.add(water);
+    const column=new THREE.Mesh(new THREE.CylinderGeometry(.16,.22,.9,10),mat(0xd4d0c5,.4,.2));
+    column.position.y=1.28; g.add(column);
+    const bowl=new THREE.Mesh(new THREE.CylinderGeometry(.48,.55,.12,12),mat(0xd4d0c5,.4,.2));
+    bowl.position.y=1.7; g.add(bowl);
   } else if(type==='dock'){
-    const plank = new THREE.Mesh(new THREE.BoxGeometry(TILE*0.9,0.2,TILE*0.9), new THREE.MeshStandardMaterial({color:def.color}));
-    plank.position.y=0.4; plank.receiveShadow=true;
-    g.add(plank);
-    for(let i=0;i<4;i++){
-      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.1,0.1,0.9,6), new THREE.MeshStandardMaterial({color:0x5c4327}));
-      post.position.set((i%2?1:-1)*1.5, -0.05, (i<2?1:-1)*1.5);
-      g.add(post);
+    const plank=new THREE.Mesh(new THREE.BoxGeometry(TILE*.95,.22,TILE*.95),mat(0x8b623d));
+    plank.position.y=.4; g.add(plank);
+    for(let i=0;i<5;i++){
+      const post=new THREE.Mesh(new THREE.CylinderGeometry(.1,.12,1.1,8),mat(0x5a3b22));
+      post.position.set(-1.6+i*.8,-.05,1.65); g.add(post);
     }
+    const rope=new THREE.Mesh(new THREE.TorusGeometry(1.15,.05,6,18,Math.PI),mat(0xc8a56a));
+    rope.rotation.x=Math.PI/2; rope.position.y=.55; g.add(rope);
   } else if(type==='windmill'){
-    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.6,0.8,2.2,8), new THREE.MeshStandardMaterial({color:def.color}));
-    base.position.y=1.2; base.castShadow=true;
-    const cap = new THREE.Mesh(new THREE.ConeGeometry(0.7,0.8,8), new THREE.MeshStandardMaterial({color:0x7a5c3a}));
-    cap.position.y=2.7;
-    const bladeGroup = new THREE.Group();
-    bladeGroup.position.set(0,2.3,0.85);
+    const base=new THREE.Mesh(new THREE.CylinderGeometry(.65,.9,2.6,10),mat(0xd7cdb7));
+    base.position.y=1.35; base.castShadow=true; g.add(base);
+    const roof=new THREE.Mesh(new THREE.ConeGeometry(.82,.75,10),mat(0x7b5434));
+    roof.position.y=3.02; g.add(roof);
+    const blades=new THREE.Group(); blades.position.set(0,2.35,.82);
     for(let i=0;i<4;i++){
-      const blade = new THREE.Mesh(new THREE.BoxGeometry(0.14,1.6,0.06), new THREE.MeshStandardMaterial({color:0xf0e6c0}));
-      blade.position.y=0.8;
-      const pivot = new THREE.Group();
-      pivot.add(blade);
-      pivot.rotation.z = i*(Math.PI/2);
-      bladeGroup.add(pivot);
+      const b=new THREE.Mesh(new THREE.BoxGeometry(.13,1.7,.08),mat(0xf1e7c7));
+      b.position.y=.85; const pivot=new THREE.Group(); pivot.add(b); pivot.rotation.z=i*Math.PI/2; blades.add(pivot);
     }
-    bladeGroup.userData.spin = true;
-    g.add(base, cap, bladeGroup);
-    g.userData.blades = bladeGroup;
-  } else if(type==='pine'){
-    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.12,0.18,0.7,6), new THREE.MeshStandardMaterial({color:0x6b4a2c}));
-    trunk.position.y=0.5; trunk.castShadow=true;
-    g.add(trunk);
-    for(let i=0;i<3;i++){
-      const cone = new THREE.Mesh(new THREE.ConeGeometry(0.68-i*0.16,0.7,8), new THREE.MeshStandardMaterial({color:def.color}));
-      cone.position.y = 1.0+i*0.5;
-      cone.castShadow = true;
-      g.add(cone);
-    }
-  } else if(type==='statue'){
-    const base = new THREE.Mesh(new THREE.BoxGeometry(1.0,0.4,1.0), new THREE.MeshStandardMaterial({color:0xcfc7b0}));
-    base.position.y=0.5; base.castShadow=true; base.receiveShadow=true;
-    const pedestal = new THREE.Mesh(new THREE.CylinderGeometry(0.32,0.4,0.85,8), new THREE.MeshStandardMaterial({color:0xcfc7b0}));
-    pedestal.position.y=1.13; pedestal.castShadow=true;
-    const figure = new THREE.Mesh(new THREE.CylinderGeometry(0.06,0.26,1.25,8), new THREE.MeshStandardMaterial({color:def.color}));
-    figure.position.y=2.18; figure.castShadow=true;
-    g.add(base, pedestal, figure);
+    blades.userData.spin=true; g.add(blades); g.userData.blades=blades;
   } else if(type==='lighthouse'){
-    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.55,0.75,2.6,10), new THREE.MeshStandardMaterial({color:def.color}));
-    base.position.y=1.5; base.castShadow=true;
-    const stripe = new THREE.Mesh(new THREE.CylinderGeometry(0.58,0.58,0.5,10), new THREE.MeshStandardMaterial({color:0xb5443a}));
-    stripe.position.y=2.0;
-    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.45,0.45,0.4,10), new THREE.MeshStandardMaterial({color:0x4a4438}));
-    cap.position.y=3.0;
-    const lightBulb = new THREE.Mesh(new THREE.SphereGeometry(0.26,10,8), new THREE.MeshBasicMaterial({color:0xffe28a, transparent:true, opacity:0.35}));
-    lightBulb.position.y=3.35;
-    lightBulb.userData.isWindow = true;
-    g.add(base, stripe, cap, lightBulb);
-  } else {
-    // houses / civic: box building with roof, size scales with cost
-    const scale = def.scale || 0.85;
-    const h = 1.2*scale;
-    const body = new THREE.Mesh(new THREE.BoxGeometry(TILE*0.62,h,TILE*0.62), new THREE.MeshStandardMaterial({color:def.color}));
-    body.position.y = h/2 + 0.28; body.castShadow=true; body.receiveShadow=true;
-    g.add(body);
-    if(type==='tower'){
-      const top = new THREE.Mesh(new THREE.BoxGeometry(TILE*0.4,1.4,TILE*0.4), new THREE.MeshStandardMaterial({color:def.color}));
-      top.position.y = h+0.28+0.7;
-      top.castShadow=true;
-      g.add(top);
-    } else {
-      const roof = new THREE.Mesh(new THREE.ConeGeometry(TILE*0.5,0.9,4), new THREE.MeshStandardMaterial({color:0x9c4a3a}));
-      roof.position.y = h+0.28+0.45;
-      roof.rotation.y = Math.PI/4;
-      roof.castShadow=true;
-      g.add(roof);
+    const base=new THREE.Mesh(new THREE.CylinderGeometry(.62,.82,3.2,12),mat(0xe9e1d0));
+    base.position.y=1.65; g.add(base);
+    const stripe=new THREE.Mesh(new THREE.CylinderGeometry(.65,.65,.5,12),mat(0xc94b3f)); stripe.position.y=2.05; g.add(stripe);
+    const balcony=new THREE.Mesh(new THREE.CylinderGeometry(.8,.8,.12,12),mat(0x4b5357,.5,.4)); balcony.position.y=3.25; g.add(balcony);
+    const cap=new THREE.Mesh(new THREE.ConeGeometry(.55,.65,12),mat(0x4b5357,.5,.4)); cap.position.y=3.75; g.add(cap);
+    const bulb=new THREE.Mesh(new THREE.SphereGeometry(.25,10,8),new THREE.MeshBasicMaterial({color:0xffe28a}));
+    bulb.position.y=3.35; bulb.userData.isWindow=true; g.add(bulb);
+  } else if(type==='statue'){
+    const base=new THREE.Mesh(new THREE.BoxGeometry(1.3,.45,1.3),mat(0xc5c1b7,.55,.25)); base.position.y=.52; g.add(base);
+    const body=new THREE.Mesh(new THREE.CylinderGeometry(.24,.38,1.35,10),mat(def.color,.5,.3)); body.position.y=1.35; g.add(body);
+    const head=new THREE.Mesh(new THREE.SphereGeometry(.3,10,8),mat(def.color,.5,.3)); head.position.y=2.15; g.add(head);
+  } else if(type==='refinery'){
+    const tank=new THREE.Mesh(new THREE.CylinderGeometry(.72,.72,1.8,14),mat(0x77828a,.35,.65)); tank.position.set(-.65,1.2,0); tank.castShadow=true;
+    const tank2=tank.clone(); tank2.scale.set(.8,1.25,.8); tank2.position.set(.7,1.45,.15);
+    const tower=new THREE.Mesh(new THREE.BoxGeometry(.45,2.9,.45),mat(0x4f5a61,.35,.7)); tower.position.set(0,1.65,-.75);
+    const pipe=new THREE.Mesh(new THREE.CylinderGeometry(.08,.08,2.2,8),mat(0xd1a84b,.3,.8)); pipe.rotation.z=Math.PI/2; pipe.position.set(0,2.15,.45);
+    const flame=new THREE.Mesh(new THREE.SphereGeometry(.13,8,6),new THREE.MeshBasicMaterial({color:0xffb52e}));
+    flame.position.set(0,3.05,-.75); flame.userData.isWindow=true;
+    g.add(tank,tank2,tower,pipe,flame);
+  } else if(type==='factory' || type==='warehouse' || type==='powerplant'){
+    const scale=def.scale||1;
+    const body=new THREE.Mesh(new THREE.BoxGeometry(2.8*scale,1.6*scale,2.7*scale),mat(def.color,.7,.25));
+    body.position.y=.8*scale+.28; body.castShadow=true; g.add(body);
+    for(let i=0;i<(type==='powerplant'?2:3);i++){
+      const stack=new THREE.Mesh(new THREE.CylinderGeometry(.16,.22,.9*scale,10),mat(0x566168,.45,.5));
+      stack.position.set(-.75+i*.75,2.0*scale,.55); stack.castShadow=true; g.add(stack);
     }
-    // little window glow (helps night scenes)
-    const win = new THREE.Mesh(new THREE.PlaneGeometry(0.4,0.4), new THREE.MeshBasicMaterial({color:0xffe28a}));
-    win.position.set(0, h*0.55+0.28, TILE*0.31+0.01);
-    win.userData.isWindow = true;
-    g.add(win);
+    const roof=new THREE.Mesh(new THREE.BoxGeometry(3.0*scale,.16,2.9*scale),mat(0x4d555b,.45,.4));
+    roof.position.y=1.65*scale+.3; g.add(roof);
+    const door=new THREE.Mesh(new THREE.BoxGeometry(.65,.9,.05),mat(0x283238,.5,.3)); door.position.set(0,.75,.05+1.35*scale); g.add(door);
+  } else {
+    // Modern, refreshed homes and civic buildings.
+    const scale=def.scale||.85;
+    const h=(type==='tower'?3.0:type==='mansion'?2.15:1.45)*scale;
+    const body=new THREE.Mesh(new THREE.BoxGeometry(2.65*scale,h,2.65*scale),mat(def.color,.62,.08));
+    body.position.y=h/2+.3; body.castShadow=true; body.receiveShadow=true; g.add(body);
+
+    const roofColor=(type==='market'||type==='tavern')?0x7f3f35:0x4f5b62;
+    if(type!=='tower'){
+      const roof=new THREE.Mesh(new THREE.ConeGeometry(1.9*scale,.8*scale,4),mat(roofColor,.7,.1));
+      roof.position.y=h+.7*scale+.3; roof.rotation.y=Math.PI/4; roof.castShadow=true; g.add(roof);
+    }else{
+      const top=new THREE.Mesh(new THREE.BoxGeometry(2.2*scale,.5,2.2*scale),mat(0x55616b,.45,.2));
+      top.position.y=h+.55; g.add(top);
+    }
+    const windowMat=new THREE.MeshBasicMaterial({color:0xffe39a});
+    for(let i=0;i<3;i++){
+      const w=new THREE.Mesh(new THREE.PlaneGeometry(.42*scale,.42*scale),windowMat);
+      w.position.set(-.72*scale+i*.72*scale,h*.58+.3,1.33*scale+.01); w.userData.isWindow=true; g.add(w);
+    }
+    const door=new THREE.Mesh(new THREE.BoxGeometry(.48*scale,.85*scale,.08),mat(0x50372c,.6));
+    door.position.set(0,.72*scale+.3,1.34*scale); g.add(door);
   }
   return g;
 }
-
 function addBuildingMesh(gx, gz, data){
   const mesh = meshForBuilding(data.type);
   const p = worldPos(gx,gz);
   mesh.position.set(p.x, 0, p.z);
   mesh.rotation.y = data.rotY||0;
   mesh.userData.gx = gx; mesh.userData.gz = gz;
+  mesh.userData.buildingType = data.type;
+  mesh.userData.buildingKey = gx+','+gz;
   buildGroup.add(mesh);
 }
 
@@ -728,7 +843,7 @@ function rebuildSceneFromState(){
    HUD
 ===================================================================== */
 function updateHUD(){
-  document.getElementById('coin-count').textContent = Math.floor(state.coins).toLocaleString();
+  document.getElementById('coin-count').textContent = Math.floor(projectedCoins()).toLocaleString();
   const isNight = isNightNow();
   document.getElementById('coin-rate').textContent = isNight ? 'Asleep — no income at night' : ('+'+state.baseRate.toFixed(1)+' / sec');
 }
@@ -811,19 +926,24 @@ function setWindowGlow(on){
    INCOME LOOP
 ===================================================================== */
 let lastIncomeTick = Date.now();
-function incomeTick(){
-  const now = Date.now();
-  const dt = (now-lastIncomeTick)/1000;
-  lastIncomeTick = now;
-  if(!isNightNow()){
-    state.coins += state.baseRate*dt;
-    updateHUD();
-  } else {
-    updateHUD();
-  }
+
+function projectedCoins(){
+  const before=state.coins, beforeAt=state.economyAt;
+  const payoutSnapshot={};
+  Object.keys(state.buildings||{}).forEach(k=>{
+    if(state.buildings[k].type==='refinery') payoutSnapshot[k]=state.buildings[k].lastPayout;
+  });
+  settleEconomy();
+  const shown=state.coins;
+  state.coins=before; state.economyAt=beforeAt;
+  Object.keys(payoutSnapshot).forEach(k=>{
+    if(state.buildings[k]) state.buildings[k].lastPayout=payoutSnapshot[k];
+  });
+  return shown;
 }
+
+function incomeTick(){ updateHUD(); }
 setInterval(incomeTick, 500);
-setInterval(()=>{ if(state.islandCode) saveIslandState(); }, 6000);
 
 /* =====================================================================
    SHIPS
@@ -881,6 +1001,7 @@ function tryClickShip(clientX, clientY){
     while(obj.parent && !obj.userData.clickable) obj = obj.parent;
     if(obj.userData.clickable && !obj.userData.collected){
       obj.userData.collected = true;
+      settleEconomy();
       const reward = 8 + Math.floor(Math.random()*18);
       state.coins += reward;
       updateHUD();
@@ -1107,6 +1228,7 @@ function buildBuildRow(cat){
       <div class="build-income">${def.income>0 ? '+'+def.income.toFixed(2)+'/s' : ''}</div>`;
     el.addEventListener('click', ()=>{
       selectedTool = (selectedTool===id) ? null : id;
+      $('delete-btn').classList.remove('active');
       buildBuildRow(document.querySelector('.tab-btn.active').dataset.cat);
       document.getElementById('action-hint').textContent = selectedTool ? ('Placing: '+def.name+' — tap the ground') : 'Pick something to build, then tap the ground';
     });
@@ -1123,6 +1245,15 @@ document.querySelectorAll('.tab-btn').forEach(btn=>{
 
 document.getElementById('resident-btn').addEventListener('click', enterResidentMode);
 document.getElementById('exit-resident-btn').addEventListener('click', exitResidentMode);
+
+$('delete-btn').addEventListener('click', ()=>{
+  selectedTool = selectedTool==='__delete__' ? null : '__delete__';
+  document.querySelectorAll('.build-item').forEach(el=>el.classList.remove('selected'));
+  $('delete-btn').classList.toggle('active', selectedTool==='__delete__');
+  $('action-hint').textContent = selectedTool==='__delete__'
+    ? 'Delete mode: tap a building to remove it (50% refund)'
+    : 'Pick something to build, then tap the ground';
+});
 
 // intercept ship clicks before build-placement raycast
 const originalHandleTap = handleTapSelect;
@@ -1156,7 +1287,10 @@ $('create-confirm').addEventListener('click', async ()=>{
   state.coins = 25;
   state.baseRate = 1.0;
   state.buildings = {};
+  state.refineryBank = 0;
   state.cycleStart = Date.now();
+  state.economyAt = Date.now();
+  state.lastSeenVersion = 0;
   await saveIslandState();
   $('code-display').firstChild.textContent = code;
   hideModal('modal-create');
@@ -1191,6 +1325,8 @@ $('join-confirm').addEventListener('click', async ()=>{
   state.baseRate = remote.baseRate;
   state.buildings = remote.buildings||{};
   state.cycleStart = remote.cycleStart||Date.now();
+  state.refineryBank = remote.refineryBank||0;
+  state.economyAt = remote.economyAt||Date.now();
   state.lastSeenVersion = remote.version||0;
   hideModal('modal-join');
   startGame();
