@@ -482,7 +482,7 @@ window.addEventListener("keyup",e=>{keys[e.key.toLowerCase()]=false});
 function enterResident(){residentMode=true;selected=null;demolish=false;document.getElementById("buildbar").style.display="none";document.getElementById("resident").style.display="none";document.getElementById("exitResident").style.display="block";document.getElementById("residentInfo").style.display="block"}
 function exitResident(){residentMode=false;document.getElementById("buildbar").style.display="block";document.getElementById("resident").style.display="block";document.getElementById("exitResident").style.display="none";document.getElementById("residentInfo").style.display="none";hint("Wybierz budynek, a następnie kliknij teren.")}
 function updateResident(dt){
-if(!residentMode)return;let forward=0,strafe=0;if(keys.w||keys.arrowup)forward++;if(keys.s||keys.arrowdown)forward--;if(keys.d||keys.arrowleft)strafe--;if(keys.a||keys.arrowright)strafe++;
+if(!residentMode)return;let forward=0,strafe=0;if(keys.w||keys.arrowup)forward++;if(keys.s||keys.arrowdown)forward--;if(keys.a||keys.arrowleft)strafe--;if(keys.d||keys.arrowright)strafe++;
 if(forward||strafe){const l=Math.hypot(forward,strafe);forward/=l;strafe/=l;const speed=10,fx=Math.sin(resident.yaw),fz=Math.cos(resident.yaw),rx=Math.cos(resident.yaw),rz=-Math.sin(resident.yaw);resident.x+=(fx*forward+rx*strafe)*speed*dt;resident.z+=(fz*forward+rz*strafe)*speed*dt}
 const max=RADIUS-5,dist=Math.hypot(resident.x,resident.z);if(dist>max){resident.x*=max/dist;resident.z*=max/dist}
 const eye=4.2;camera.position.set(resident.x,eye,resident.z);const ld=20;
